@@ -1,0 +1,22 @@
+{
+  "name": "youbiquti",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The Service Graph - Trust-Weighted Commerce Protocol",
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter @youbiquti/api dev\" \"pnpm --filter @youbiquti/web dev\"",
+    "dev:tools": "pnpm --filter @youbiquti/tools start",
+    "build": "pnpm -r build",
+    "clean": "pnpm -r clean",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=20.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}
