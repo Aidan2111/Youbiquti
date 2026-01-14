@@ -2,7 +2,8 @@
 
 import type { ChatSession, SendMessageResponse } from '../types';
 
-const API_BASE = '/api';
+// In production, use the deployed API URL; in dev, use the Vite proxy
+const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
 /**
  * Create a new chat session

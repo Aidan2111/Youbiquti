@@ -3,12 +3,14 @@
   "version": "0.0.1",
   "private": true,
   "description": "GNO Tool Azure Functions",
-  "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "node esbuild.config.mjs",
+    "build:tsc": "tsc",
     "watch": "tsc -w",
     "start": "func start",
+    "predeploy": "npm run build",
+    "deploy": "func azure functionapp publish gno-tools-func",
     "clean": "rimraf dist"
   },
   "dependencies": {
@@ -19,6 +21,7 @@
   },
   "devDependencies": {
     "azure-functions-core-tools": "^4.0.5571",
+    "esbuild": "^0.20.0",
     "rimraf": "^5.0.5",
     "typescript": "^5.4.0"
   }

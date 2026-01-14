@@ -10,7 +10,7 @@ import {
   updateSession,
   deleteSession,
 } from '../db/index.js';
-import { mockAgentService } from '../services/index.js';
+import { mockAgentService, foundryAgentService } from '../services/index.js';
 import type {
   ChatSession,
   ChatMessage,
@@ -146,8 +146,10 @@ router.post('/:id/messages', async (req: Request, res: Response) => {
     
     session.messages.push(userMessage);
     
-    // Process message with mock agent
-    const response = await mockAgentService.processMessage(session, body.content);
+    // Process message with Foundry agent (falls back to mock if unavailable)
+    const useFoundry = process.env.USE_FOUNDRY_AGENT !== 'false';
+    const agentService = useFoundry ? foundryAgentService : mockAgentService;
+    const response = await agentService.processMessage(session, body.content);
     
     // Add assistant response
     session.messages.push(response.message);
