@@ -1,7 +1,7 @@
 // GNO API Server - Main entry point
 
 // IMPORTANT: Telemetry must be imported FIRST before any other modules
-import './telemetry.js';
+import { trackException } from './telemetry.js';
 
 import 'dotenv/config';
 import express from 'express';
@@ -101,10 +101,8 @@ app.use((_req, res) => {
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('Unhandled error:', err);
-  // Track exceptions with Application Insights
-  import('./telemetry.js').then(({ trackException }) => {
-    trackException(err, { endpoint: _req.path, method: _req.method });
-  }).catch(() => {/* ignore telemetry errors */});
+  // Track exceptions with Application Insights (using statically imported trackException)
+  trackException(err, { endpoint: _req.path, method: _req.method });
   res.status(500).json({ error: 'Internal server error' });
 });
 

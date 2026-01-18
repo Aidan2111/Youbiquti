@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import type { ChatSession, ChatMessage, NightPlan, AgentState } from '../types';
-import { createSession, sendMessage as apiSendMessage } from '../api';
+import { createSession, sendMessage as apiSendMessage, getSession } from '../api';
 
 interface UseChatReturn {
   session: ChatSession | null;
@@ -224,18 +224,30 @@ export function useChat(): UseChatReturn {
     if (initialized) return;
     setInitialized(true);
 
-    const stored = loadSession();
+    const initializeSession = async () => {
+      const stored = loadSession();
 
-    if (stored) {
-      // Restore saved session
-      setSession({ id: stored.sessionId } as ChatSession);
-      setMessages(stored.messages);
-      setPlan(stored.plan);
-      setState(stored.state);
-    } else {
-      // Start fresh
-      startNewSession();
-    }
+      if (stored) {
+        try {
+          // Health check: verify the stored session is still valid on the backend
+          await getSession(stored.sessionId);
+          // If the health check succeeds, restore the saved session
+          setSession({ id: stored.sessionId } as ChatSession);
+          setMessages(stored.messages);
+          setPlan(stored.plan);
+          setState(stored.state);
+        } catch {
+          // If validation fails, clear stale session and start fresh
+          clearStoredSession();
+          await startNewSession();
+        }
+      } else {
+        // No stored session: start fresh
+        await startNewSession();
+      }
+    };
+
+    void initializeSession();
   }, [initialized, startNewSession]);
 
   return {
