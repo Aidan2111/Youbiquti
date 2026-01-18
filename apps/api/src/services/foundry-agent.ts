@@ -2,6 +2,7 @@
 // Connects to the existing GNOPlanner agent for real AI-powered responses
 
 import { generateId } from '@youbiquti/core';
+import { agentTelemetry, trackException, SpanStatusCode } from '../telemetry.js';
 import type { Restaurant, Bar } from '@youbiquti/core';
 import type {
   AgentState,
@@ -164,7 +165,8 @@ interface FoundryRun {
         type: string;
         function?: {
           name: string;
-          arguments: string;
+          arguments?: string;   // Some SDK versions use 'arguments'
+          parameters?: string;  // Some SDK versions use 'parameters'
         };
       }>;
     };
@@ -184,9 +186,9 @@ export class FoundryAgentService {
 
   constructor() {
     this.config = {
-      projectEndpoint: process.env.PROJECT_ENDPOINT || 
+      projectEndpoint: process.env.PROJECT_ENDPOINT ||
         process.env.AZURE_EXISTING_AIPROJECT_ENDPOINT ||
-        'https://youbiquity.services.ai.azure.com/api/projects/aidan-prototype',
+        'https://youbiqiuity-agents-resource.services.ai.azure.com/api/projects/youbiqiuity-agents',
       modelDeploymentName: process.env.MODEL_DEPLOYMENT_NAME || 'gpt-5-mini',
       agentName: process.env.AGENT_NAME || 'GNOPlanner',
       existingAgentId: process.env.AZURE_EXISTING_AGENT_ID, // e.g., 'asst_abc123'
@@ -225,6 +227,9 @@ export class FoundryAgentService {
       this.initialized = true;
       console.log('[FoundryAgent] Azure AI Projects client initialized successfully (new Foundry)');
       console.log(`[FoundryAgent] Using agent: ${this.agent?.name} (${this.agent?.id})`);
+
+      // Track agent initialization
+      agentTelemetry.trackAgentInit(this.agent?.id ?? 'unknown', this.agent?.name ?? 'GNOPlanner');
     } catch (error) {
       console.warn('[FoundryAgent] Failed to initialize Azure AI Projects SDK:', error);
       console.log('[FoundryAgent] Falling back to mock mode');
@@ -394,11 +399,17 @@ export class FoundryAgentService {
     session: ChatSession,
     userMessage: string
   ): Promise<SendMessageResponse> {
+    // Track message processing with telemetry
+    const messageSpan = agentTelemetry.trackMessageProcessing(session.id, userMessage.length);
+
     await this.initialize();
 
     // If SDK isn't available, use simplified mock
     if (!this.initialized || !this.client || !this.agent) {
       console.log('[FoundryAgent] Using mock processing (SDK not available)');
+      agentTelemetry.trackFallbackToMock('SDK not available');
+      messageSpan.setStatus({ code: SpanStatusCode.OK });
+      messageSpan.end();
       return this.processMockMessage(session, userMessage);
     }
 
@@ -414,6 +425,9 @@ export class FoundryAgentService {
         threadId = thread.id as string;
         this.sessionThreads.set(session.id, threadId);
         console.log(`[FoundryAgent] Created new thread: ${threadId}`);
+
+        // Track thread creation
+        agentTelemetry.trackThreadCreated(threadId, session.id);
         
         // Add existing conversation history if any
         for (const msg of session.messages) {
@@ -427,14 +441,28 @@ export class FoundryAgentService {
       await this.client.agents.messages.create(threadId, 'user', userMessage);
 
       // Create a run with the agent
+      const runStartTime = Date.now();
       let run = await this.client.agents.runs.create(threadId, this.agent.id);
       console.log(`[FoundryAgent] Created run: ${run.id}`);
+
+      // Track run creation
+      agentTelemetry.trackRunCreated(run.id, threadId);
 
       // Poll for completion, handling tool calls
       const toolResults: Array<{ tool: string; result: unknown }> = [];
       run = await this.pollRunWithToolExecution(threadId, run.id, toolResults);
-      
+
       console.log(`[FoundryAgent] Run completed with status: ${run.status}`);
+
+      // Track run completion
+      agentTelemetry.trackRunCompleted(run.id, run.status, Date.now() - runStartTime);
+
+      // Handle failed runs - fall back to mock processing
+      if (run.status === 'failed' || run.status === 'cancelled' || run.status === 'expired') {
+        console.log(`[FoundryAgent] Run failed with status ${run.status}, falling back to mock`);
+        agentTelemetry.trackFallbackToMock(`Run ${run.status}`);
+        return this.processMockMessage(session, userMessage);
+      }
 
       // Get the latest assistant message
       // Using new Foundry pattern: client.agents.messages.list()
@@ -463,10 +491,17 @@ export class FoundryAgentService {
       };
 
       // Extract plan from tool results and response
+      console.log(`[FoundryAgent] Tool results collected: ${toolResults.length} results`);
+      if (toolResults.length > 0) {
+        console.log(`[FoundryAgent] Tool names: ${toolResults.map(r => r.tool).join(', ')}`);
+      }
       const plan = this.extractPlanFromResponse(responseContent, toolResults, session);
 
       // Determine state based on response content
       const nextState = this.inferState(responseContent, session.state);
+
+      messageSpan.setStatus({ code: SpanStatusCode.OK });
+      messageSpan.end();
 
       return {
         message: responseMessage,
@@ -476,6 +511,14 @@ export class FoundryAgentService {
     } catch (error) {
       console.error('[FoundryAgent] Error processing message:', error);
       console.log('[FoundryAgent] Falling back to mock processing');
+
+      // Track error and fallback
+      messageSpan.setStatus({ code: SpanStatusCode.ERROR, message: (error as Error).message });
+      messageSpan.recordException(error as Error);
+      messageSpan.end();
+      agentTelemetry.trackFallbackToMock((error as Error).message);
+      trackException(error as Error, { sessionId: session.id, fallback: 'mock' });
+
       return this.processMockMessage(session, userMessage);
     }
   }
@@ -501,6 +544,13 @@ export class FoundryAgentService {
       console.log(`[FoundryAgent] Run status: ${run.status}`);
 
       if (run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled' || run.status === 'expired') {
+        // Log additional details for failed runs
+        if (run.status === 'failed') {
+          const runDetails = run as unknown as { lastError?: { code?: string; message?: string } };
+          if (runDetails.lastError) {
+            console.error(`[FoundryAgent] Run failed - Code: ${runDetails.lastError.code}, Message: ${runDetails.lastError.message}`);
+          }
+        }
         return run;
       }
 
@@ -515,13 +565,19 @@ export class FoundryAgentService {
             let args: Record<string, unknown> = {};
             
             try {
-              args = JSON.parse(toolCall.function.arguments);
+              // Handle both 'arguments' and 'parameters' (SDK version differences)
+              const argsString = toolCall.function.arguments || toolCall.function.parameters || '{}';
+              args = JSON.parse(argsString);
             } catch {
               console.warn(`[FoundryAgent] Failed to parse args for ${toolName}`);
             }
 
             console.log(`[FoundryAgent] Executing tool: ${toolName}`, args);
-            
+
+            // Track tool call with telemetry
+            const toolStartTime = Date.now();
+            const toolSpan = agentTelemetry.trackToolCallStart(toolName, args);
+
             try {
               const result = await this.executeToolCall(toolName, args);
               toolResults.push({ tool: toolName, result });
@@ -529,9 +585,23 @@ export class FoundryAgentService {
                 toolCallId: toolCall.id,
                 output: JSON.stringify(result),
               });
-              console.log(`[FoundryAgent] Tool ${toolName} completed successfully`);
+
+              // Track tool success
+              const toolDuration = Date.now() - toolStartTime;
+              toolSpan.setStatus({ code: SpanStatusCode.OK });
+              toolSpan.end();
+              agentTelemetry.trackToolCall(toolName, toolDuration, true);
+              console.log(`[FoundryAgent] Tool ${toolName} completed successfully (${toolDuration}ms)`);
             } catch (error) {
               console.error(`[FoundryAgent] Tool ${toolName} failed:`, error);
+
+              // Track tool failure
+              const toolDuration = Date.now() - toolStartTime;
+              toolSpan.setStatus({ code: SpanStatusCode.ERROR, message: (error as Error).message });
+              toolSpan.recordException(error as Error);
+              toolSpan.end();
+              agentTelemetry.trackToolCall(toolName, toolDuration, false);
+
               toolOutputs.push({
                 toolCallId: toolCall.id,
                 output: JSON.stringify({ error: 'Tool execution failed' }),
@@ -619,55 +689,138 @@ Format the final plan as a clear timeline with emoji headers, venue names in bol
     userMessage: string
   ): Promise<SendMessageResponse> {
     const lowerMessage = userMessage.toLowerCase();
-    let content: string;
+    let content = "I'm here to help you plan the perfect night out! 💅 Tell me what you're looking for.";
     let nextState: AgentState = session.state;
     const toolResults: Array<{ tool: string; result: unknown }> = [];
 
-    if (session.state === 'greeting' || lowerMessage.includes('hello') || lowerMessage.includes('hi') || lowerMessage.includes('hey')) {
-      content = "Hey girl! 💅 I'm so excited to help you plan an amazing night out in Dallas! Tell me about your crew - how many people are we planning for, and when are you thinking?";
-      nextState = 'gathering';
-    } else if (session.state === 'gathering' || lowerMessage.includes('people') || lowerMessage.includes('saturday') || lowerMessage.includes('friday')) {
-      content = "Perfect! Let me search for some fabulous options for you... Give me just a sec to find the hottest spots! 🔍";
-      nextState = 'searching';
-    } else if (session.state === 'searching' || lowerMessage.includes('search') || lowerMessage.includes('find') || lowerMessage.includes('looking')) {
-      // Simulate a search using Azure Functions
-      const restaurants = await callAzureFunction('searchRestaurants', {
-        location: 'Dallas, TX',
-        partySize: 4,
-      }) as { restaurants: Restaurant[]; total: number };
-      
-      toolResults.push({ tool: 'search_restaurants', result: restaurants });
-      
-      if (restaurants.restaurants.length > 0) {
-        const top3 = restaurants.restaurants.slice(0, 3);
-        content = `I found some amazing spots! Here are my top picks:\n\n${top3.map((r: Restaurant, i: number) => 
-          `${i + 1}. **${r.name}** - ${r.cuisine} (${'$'.repeat(r.priceLevel)}) ⭐ ${r.rating}`
-        ).join('\n')}\n\nWhat do you think? Want more details on any of these? ✨`;
-        nextState = 'presenting';
-      } else {
-        content = "Hmm, I'm having trouble finding places right now. Can you tell me more about what you're looking for?";
-      }
-    } else if (lowerMessage.includes('bar') || lowerMessage.includes('drink') || lowerMessage.includes('cocktail')) {
-      const bars = await callAzureFunction('searchBars', {
-        location: 'Dallas, TX',
-      }) as { bars: Bar[]; total: number };
-      
-      toolResults.push({ tool: 'search_bars', result: bars });
-      
-      if (bars.bars.length > 0) {
-        const top3 = bars.bars.slice(0, 3);
-        content = `Ooh, I love bar hunting! 🍸 Here are some fab options:\n\n${top3.map((b: Bar, i: number) => 
-          `${i + 1}. **${b.name}** - ${b.vibes.join(', ')} (${'$'.repeat(b.priceLevel)}) ⭐ ${b.rating}`
-        ).join('\n')}\n\nAny of these catch your eye?`;
-        nextState = 'presenting';
-      } else {
-        content = "Let me dig a bit deeper for the perfect bar spots!";
-      }
-    } else if (session.state === 'presenting' || lowerMessage.includes('sounds good') || lowerMessage.includes('perfect') || lowerMessage.includes('love')) {
-      content = "Amazing choice! 💃 I'll add that to your plan. Want me to check availability and get directions? Or should we look for what comes next in your evening?";
-      nextState = 'refining';
-    } else {
-      content = "I'm here to help you plan the perfect night out! 💅 Tell me what you're looking for - dinner, drinks, events, or all of the above?";
+    console.log(`[FoundryAgent] Mock processing - current state: ${session.state}, message: "${userMessage.substring(0, 50)}..."`);
+
+    // Use switch statement for cleaner state-based logic
+    switch (session.state) {
+      case 'greeting':
+        content = "Hey girl! 💅 I'm so excited to help you plan an amazing night out in Dallas! Tell me about your crew - how many people are we planning for, and when are you thinking?";
+        nextState = 'gathering';
+        break;
+
+      case 'gathering':
+        // User is providing details - search for venues
+        content = "Perfect! Let me search for some fabulous options for you... 🔍";
+        nextState = 'searching';
+
+        // Trigger restaurant search
+        try {
+          const restaurants = await callAzureFunction('searchRestaurants', {
+            location: 'Dallas, TX',
+            partySize: 4,
+          }) as { restaurants: Restaurant[]; total: number };
+
+          toolResults.push({ tool: 'search_restaurants', result: restaurants });
+
+          if (restaurants.restaurants.length > 0) {
+            const top3 = restaurants.restaurants.slice(0, 3);
+            content = `I found some amazing spots! Here are my top picks:\n\n${top3.map((r: Restaurant, i: number) =>
+              `${i + 1}. **${r.name}** - ${r.cuisine} (${'$'.repeat(r.priceLevel)}) ⭐ ${r.rating}`
+            ).join('\n')}\n\nWhat do you think? Want more details on any of these, or should we also look for bars? ✨`;
+            nextState = 'presenting';
+          }
+        } catch (error) {
+          console.error('[FoundryAgent] Search failed:', error);
+          content = "I'm searching for the best spots... What kind of vibe are you going for?";
+        }
+        break;
+
+      case 'searching':
+        // Still searching - present results
+        try {
+          const restaurants = await callAzureFunction('searchRestaurants', {
+            location: 'Dallas, TX',
+            partySize: 4,
+          }) as { restaurants: Restaurant[]; total: number };
+
+          toolResults.push({ tool: 'search_restaurants', result: restaurants });
+
+          if (restaurants.restaurants.length > 0) {
+            const top3 = restaurants.restaurants.slice(0, 3);
+            content = `Here are my top picks:\n\n${top3.map((r: Restaurant, i: number) =>
+              `${i + 1}. **${r.name}** - ${r.cuisine} (${'$'.repeat(r.priceLevel)}) ⭐ ${r.rating}`
+            ).join('\n')}\n\nAny of these catch your eye? ✨`;
+            nextState = 'presenting';
+          } else {
+            content = "Hmm, I'm having trouble finding places right now. Can you tell me more about what you're looking for?";
+          }
+        } catch (error) {
+          content = "Let me keep looking for the perfect spots for you!";
+        }
+        break;
+
+      case 'presenting':
+        // User is responding to presented options
+        if (lowerMessage.includes('bar') || lowerMessage.includes('drink') || lowerMessage.includes('cocktail')) {
+          try {
+            const bars = await callAzureFunction('searchBars', {
+              location: 'Dallas, TX',
+            }) as { bars: Bar[]; total: number };
+
+            toolResults.push({ tool: 'search_bars', result: bars });
+
+            if (bars.bars.length > 0) {
+              const top3 = bars.bars.slice(0, 3);
+              content = `Ooh, I love bar hunting! 🍸 Here are some fab options:\n\n${top3.map((b: Bar, i: number) =>
+                `${i + 1}. **${b.name}** - ${b.vibes.join(', ')} (${'$'.repeat(b.priceLevel)}) ⭐ ${b.rating}`
+              ).join('\n')}\n\nAny of these catch your eye?`;
+            } else {
+              content = "Let me dig a bit deeper for the perfect bar spots!";
+            }
+          } catch (error) {
+            content = "Looking for the perfect bar spots for you! 🍸";
+          }
+        } else if (lowerMessage.includes('yes') || lowerMessage.includes('sounds good') || lowerMessage.includes('perfect') || lowerMessage.includes('love') || lowerMessage.includes('great')) {
+          content = "Amazing choice! 💃 I'll add that to your plan. Want me to look for bars or live music venues next?";
+          nextState = 'refining';
+        } else {
+          content = "Would you like more details on any of these options? Or should we look for bars and nightlife next? 🌙";
+        }
+        break;
+
+      case 'refining':
+        if (lowerMessage.includes('bar') || lowerMessage.includes('drink') || lowerMessage.includes('music') || lowerMessage.includes('yes')) {
+          try {
+            const bars = await callAzureFunction('searchBars', {
+              location: 'Dallas, TX',
+            }) as { bars: Bar[]; total: number };
+
+            toolResults.push({ tool: 'search_bars', result: bars });
+
+            if (bars.bars.length > 0) {
+              const top3 = bars.bars.slice(0, 3);
+              content = `For drinks and vibes, check these out! 🍸\n\n${top3.map((b: Bar, i: number) =>
+                `${i + 1}. **${b.name}** - ${b.vibes.join(', ')} (${'$'.repeat(b.priceLevel)}) ⭐ ${b.rating}`
+              ).join('\n')}\n\nLet me know which one sounds good!`;
+              nextState = 'presenting';
+            }
+          } catch (error) {
+            content = "Searching for the perfect spots for after dinner! 🌙";
+          }
+        } else if (lowerMessage.includes('done') || lowerMessage.includes('complete') || lowerMessage.includes('that\'s it') || lowerMessage.includes('looks good')) {
+          content = "Your plan is looking amazing! 🎉 Have the best night out! Let me know if you need any changes.";
+          nextState = 'complete';
+        } else {
+          content = "Would you like to add bars, live music, or are you all set with your plan? 💅";
+        }
+        break;
+
+      case 'confirming':
+        content = "Everything looks great! 🎉 Your night is going to be amazing. Have fun!";
+        nextState = 'complete';
+        break;
+
+      case 'complete':
+        content = "Glad I could help plan your night! 💃 If you want to start a new plan, just click 'New Plan' at the top.";
+        break;
+
+      default:
+        content = "I'm here to help you plan the perfect night out! 💅 Tell me what you're looking for - dinner, drinks, events, or all of the above?";
+        nextState = 'gathering';
     }
 
     const responseMessage: ChatMessage = {
@@ -728,10 +881,15 @@ Format the final plan as a clear timeline with emoji headers, venue names in bol
     toolResults: Array<{ tool: string; result: unknown }>,
     session: ChatSession
   ): NightPlan | undefined {
+    console.log(`[FoundryAgent] extractPlanFromResponse called with ${toolResults.length} tool results`);
+
     const restaurantResults = toolResults.find(r => r.tool === 'search_restaurants');
     const barResults = toolResults.find(r => r.tool === 'search_bars');
 
+    console.log(`[FoundryAgent] Found restaurant results: ${!!restaurantResults}, bar results: ${!!barResults}`);
+
     if (!restaurantResults && !barResults) {
+      console.log('[FoundryAgent] No restaurant or bar results found, returning undefined');
       return undefined;
     }
 

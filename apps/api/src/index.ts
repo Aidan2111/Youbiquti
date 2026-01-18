@@ -1,5 +1,8 @@
 // GNO API Server - Main entry point
 
+// IMPORTANT: Telemetry must be imported FIRST before any other modules
+import './telemetry.js';
+
 import 'dotenv/config';
 import express from 'express';
 import type { Express } from 'express';
@@ -13,6 +16,36 @@ import {
 
 const app: Express = express();
 const PORT = process.env.PORT ?? 3001;
+
+// Validate Azure AI Foundry configuration on startup
+function validateAzureConfig(): void {
+  const useFoundry = process.env.USE_FOUNDRY_AGENT !== 'false';
+
+  if (useFoundry) {
+    console.log('\n🔧 Azure AI Foundry Configuration:');
+
+    const endpoint = process.env.PROJECT_ENDPOINT;
+    const model = process.env.MODEL_DEPLOYMENT_NAME || 'gpt-4o';
+    const agentName = process.env.AGENT_NAME || 'GNOPlanner';
+    const functionsUrl = process.env.AZURE_FUNCTION_APP_URL || 'http://localhost:7071/api';
+
+    if (!endpoint) {
+      console.warn('  ⚠️  PROJECT_ENDPOINT not set - will fall back to mock agent');
+      console.warn('     Set PROJECT_ENDPOINT in .env to connect to Azure AI Foundry');
+    } else {
+      console.log(`  ✅ Project Endpoint: ${endpoint}`);
+      console.log(`  ✅ Model: ${model}`);
+      console.log(`  ✅ Agent Name: ${agentName}`);
+      console.log(`  ✅ Functions URL: ${functionsUrl}`);
+      console.log('  📝 Using DefaultAzureCredential (ensure you are logged in via "az login")');
+    }
+  } else {
+    console.log('\n🎭 Mock Agent Mode (USE_FOUNDRY_AGENT=false)');
+  }
+  console.log('');
+}
+
+validateAzureConfig();
 
 // Middleware
 app.use(cors());
@@ -68,6 +101,10 @@ app.use((_req, res) => {
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('Unhandled error:', err);
+  // Track exceptions with Application Insights
+  import('./telemetry.js').then(({ trackException }) => {
+    trackException(err, { endpoint: _req.path, method: _req.method });
+  }).catch(() => {/* ignore telemetry errors */});
   res.status(500).json({ error: 'Internal server error' });
 });
 

@@ -2,6 +2,8 @@ node_modules/
 dist/
 .env
 .env.local
+.env.development
+.env.*.local
 *.log
 .DS_Store
 Thumbs.db
@@ -19,3 +21,23 @@ apps/api/data/
 apps/tools/bin/
 apps/tools/obj/
 local.settings.json
+
+# Claude Code
+.claude/
+
+# Windows artifacts
+nul
+
+# Coverage
+coverage/
+
+# Temp files
+*.tmp
+*.temp
+
+# Lock files (optional - comment out if you want to commit)
+# pnpm-lock.yaml
+
+# Docker
+*.log
+docker-compose.override.yml

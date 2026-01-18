@@ -1,2 +1,2 @@
 export { PlanCard } from './PlanCard';
-export { PlanSidebar } from './PlanSidebar';
+export { PlanSidebar, PlanToggleButton } from './PlanSidebar';
