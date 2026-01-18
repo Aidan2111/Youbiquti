@@ -435,14 +435,23 @@ export function searchDallasRestaurants(params: {
 }): Restaurant[] {
   let results = [...dallasRestaurants];
   
-  // Filter by neighborhood
+  // Filter by neighborhood/location - bidirectional matching
+  // "Deep Ellum, Dallas" should match restaurants in "Deep Ellum" neighborhood
   if (params.location) {
     const locationLower = params.location.toLowerCase();
-    results = results.filter(r => 
-      r.neighborhood.toLowerCase().includes(locationLower) ||
-      r.city.toLowerCase().includes(locationLower) ||
-      r.address.toLowerCase().includes(locationLower)
-    );
+    results = results.filter(r => {
+      const neighborhoodLower = r.neighborhood.toLowerCase();
+      const cityLower = r.city.toLowerCase();
+      const addressLower = r.address.toLowerCase();
+
+      // Check if search term contains restaurant's location data (e.g., "deep ellum, dallas" contains "deep ellum")
+      // OR if restaurant's data contains search term (e.g., "dallas" contains "dallas")
+      return locationLower.includes(neighborhoodLower) ||
+        locationLower.includes(cityLower) ||
+        neighborhoodLower.includes(locationLower) ||
+        cityLower.includes(locationLower) ||
+        addressLower.includes(locationLower);
+    });
   }
   
   // Filter by cuisine
